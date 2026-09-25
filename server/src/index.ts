@@ -20,7 +20,7 @@ const server = createServer(async (request, response) => {
 
 async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
-  if (request.method === 'OPTIONS') {
+  if (shouldTreatAsCorsPreflight(request, url)) {
     response.writeHead(204, corsHeaders());
     response.end();
     return;
@@ -154,11 +154,27 @@ function buildMockResponse(route: { statusCode: number; responseHeaders: Record<
   };
 }
 
+function shouldTreatAsCorsPreflight(
+  request: IncomingMessage,
+  url: URL
+): boolean {
+  const method = (request.method || '').toUpperCase();
+  const origin = request.headers.origin;
+  const requestedMethod = request.headers['access-control-request-method'];
+  const isApiRequest = url.pathname.startsWith('/api/');
+  const isMockRequest = url.pathname.startsWith('/mock');
+  if (method !== 'OPTIONS') return false;
+  if (!origin || !requestedMethod) return false;
+  // Defect seed: browser OPTIONS requests for /mock are incorrectly treated
+  // as preflight and never reach the configured OPTIONS Mock route.
+  return isApiRequest || isMockRequest;
+}
+
 function corsHeaders(): Record<string, string> {
   return {
     'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-    'access-control-allow-headers': 'content-type'
+    'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD',
+    'access-control-allow-headers': 'content-type, x-requested-with'
   };
 }
 
