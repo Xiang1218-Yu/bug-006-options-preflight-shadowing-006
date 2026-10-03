@@ -20,7 +20,10 @@ const server = createServer(async (request, response) => {
 
 async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
-  if (shouldTreatAsCorsPreflight(request, url)) {
+  // Only the management API short-circuits on CORS preflight. Requests under
+  // /mock must reach route matching first so a configured OPTIONS Mock wins
+  // over the generic preflight response.
+  if (url.pathname.startsWith('/api/') && isCorsPreflightRequest(request)) {
     response.writeHead(204, corsHeaders());
     response.end();
     return;
@@ -108,6 +111,13 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     const method = normalizeMethod(methodFromRequest(request));
     const route = findMatchingRoute(store.list(), method, mockPath);
     if (!route) {
+      // No configured Mock: a real CORS preflight still gets a valid 204,
+      // otherwise the mock path is simply unmatched.
+      if (isCorsPreflightRequest(request)) {
+        response.writeHead(204, corsHeaders());
+        response.end();
+        return;
+      }
       sendJson(response, 404, { error: `没有找到 ${method} ${mockPath} 的 Mock 路由` });
       return;
     }
@@ -154,20 +164,13 @@ function buildMockResponse(route: { statusCode: number; responseHeaders: Record<
   };
 }
 
-function shouldTreatAsCorsPreflight(
-  request: IncomingMessage,
-  url: URL
-): boolean {
+function isCorsPreflightRequest(request: IncomingMessage): boolean {
   const method = (request.method || '').toUpperCase();
   const origin = request.headers.origin;
   const requestedMethod = request.headers['access-control-request-method'];
-  const isApiRequest = url.pathname.startsWith('/api/');
-  const isMockRequest = url.pathname.startsWith('/mock');
   if (method !== 'OPTIONS') return false;
   if (!origin || !requestedMethod) return false;
-  // Defect seed: browser OPTIONS requests for /mock are incorrectly treated
-  // as preflight and never reach the configured OPTIONS Mock route.
-  return isApiRequest || isMockRequest;
+  return true;
 }
 
 function corsHeaders(): Record<string, string> {
