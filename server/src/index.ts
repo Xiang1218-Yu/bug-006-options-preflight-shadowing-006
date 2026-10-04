@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { findMatchingRoute } from './matcher.js';
 import { HttpError, methodFromRequest, readJson, sendJson, sendText } from './http.js';
 import { MockStore, normalizePath } from './store.js';
-import type { HttpMethod, MockRouteInput, ReplayRequest } from './types.js';
+import type { HttpMethod, MockRoute, MockRouteInput, ReplayRequest } from './types.js';
 
 const port = Number(process.env.PORT || 4000);
 const store = new MockStore();
@@ -20,7 +20,17 @@ const server = createServer(async (request, response) => {
 
 async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
-  if (shouldTreatAsCorsPreflight(request, url)) {
+  const method = methodFromRequest(request);
+
+  // For /mock OPTIONS requests, a user-configured OPTIONS Mock takes precedence
+  // over CORS preflight handling: only fall back to the generic 204 preflight
+  // response (or 404 for non-preflight requests) when no Mock matches.
+  let mockOptionsRoute: MockRoute | undefined;
+  if (method === 'OPTIONS' && url.pathname.startsWith('/mock')) {
+    const mockPath = url.pathname.slice('/mock'.length) || '/';
+    mockOptionsRoute = findMatchingRoute(store.list(), 'OPTIONS', mockPath);
+  }
+  if (shouldTreatAsCorsPreflight(request, url, mockOptionsRoute)) {
     response.writeHead(204, corsHeaders());
     response.end();
     return;
@@ -105,8 +115,9 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
 
   if (url.pathname.startsWith('/mock')) {
     const mockPath = url.pathname.slice('/mock'.length) || '/';
-    const method = normalizeMethod(methodFromRequest(request));
-    const route = findMatchingRoute(store.list(), method, mockPath);
+    const route = method === 'OPTIONS'
+      ? mockOptionsRoute
+      : findMatchingRoute(store.list(), normalizeMethod(method), mockPath);
     if (!route) {
       sendJson(response, 404, { error: `没有找到 ${method} ${mockPath} 的 Mock 路由` });
       return;
@@ -156,18 +167,18 @@ function buildMockResponse(route: { statusCode: number; responseHeaders: Record<
 
 function shouldTreatAsCorsPreflight(
   request: IncomingMessage,
-  url: URL
+  url: URL,
+  mockOptionsRoute?: MockRoute
 ): boolean {
   const method = (request.method || '').toUpperCase();
   const origin = request.headers.origin;
   const requestedMethod = request.headers['access-control-request-method'];
-  const isApiRequest = url.pathname.startsWith('/api/');
-  const isMockRequest = url.pathname.startsWith('/mock');
   if (method !== 'OPTIONS') return false;
   if (!origin || !requestedMethod) return false;
-  // Defect seed: browser OPTIONS requests for /mock are incorrectly treated
-  // as preflight and never reach the configured OPTIONS Mock route.
-  return isApiRequest || isMockRequest;
+  // A configured OPTIONS Mock on /mock wins over preflight handling, so its
+  // full user-defined response is replayed instead of the generic 204.
+  if (url.pathname.startsWith('/mock') && mockOptionsRoute) return false;
+  return url.pathname.startsWith('/api/') || url.pathname.startsWith('/mock');
 }
 
 function corsHeaders(): Record<string, string> {
